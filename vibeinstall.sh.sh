@@ -66,6 +66,19 @@ setup_network() {
     fi
 }
 
+# --- Выбор Dual Boot ---
+dual_boot_choice() {
+    echo -n -e "${GREEN}Установить Dual Boot с Windows? (y/N): ${NC}"
+    read dual_boot
+    if [[ $dual_boot == [yY] ]]; then
+        DUAL_BOOT=true
+        echo -e "${YELLOW}Режим Dual Boot активирован${NC}"
+    else
+        DUAL_BOOT=false
+        echo -e "${YELLOW}Будет установлен только Arch Linux${NC}"
+    fi
+}
+
 # --- Разметка диска (авто/GPT) ---
 auto_partition() {
     echo -e "${YELLOW}Выбери диск для установки:${NC}"
@@ -134,15 +147,15 @@ configure_system() {
     arch-chroot /mnt passwd
 }
 
-# --- Установка загрузчика (GRUB + Dual Boot) ---
+# --- Установка загрузчика (GRUB) ---
 install_grub() {
     echo -e "${YELLOW}Ставлю GRUB...${NC}"
     arch-chroot /mnt pacman -S --noconfirm grub efibootmgr os-prober
     arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
 
-    # Если есть Windows — добавляем в GRUB
-    if lsblk -o FSTYPE | grep -i ntfs &>/dev/null; then
-        echo -e "${GREEN}Найден Windows, добавляю в загрузчик...${NC}"
+    # Настройка Dual Boot если выбран
+    if $DUAL_BOOT; then
+        echo -e "${GREEN}Настраиваю Dual Boot с Windows...${NC}"
         echo "GRUB_DISABLE_OS_PROBER=false" >> /mnt/etc/default/grub
     fi
 
@@ -179,7 +192,7 @@ install_gui() {
 
 # ===== ЗАПУСК =====
 clear
-echo -e "${GREEN}=== VibeArchInstall 2.0 (FULL AUTO) ===${NC}"
+echo -e "${GREEN}=== VibeArchInstall 2.1 (FULL AUTO) ===${NC}"
 
 # 1. Выбор ядра
 kernel_menu
@@ -187,25 +200,28 @@ kernel_menu
 # 2. Настройка сети
 setup_network
 
-# 3. Разметка диска
+# 3. Выбор Dual Boot
+dual_boot_choice
+
+# 4. Разметка диска
 auto_partition
 
-# 4. Установка Arch
+# 5. Установка Arch
 install_arch
 
-# 5. Настройка системы
+# 6. Настройка системы
 configure_system
 
-# 6. GRUB + Dual Boot
+# 7. GRUB (с учетом выбора Dual Boot)
 install_grub
 
-# 7. Пользователь
+# 8. Пользователь
 create_user
 
-# 8. Допы
+# 9. Допы
 install_extras
 
-# 9. Графика (по желанию)
+# 10. Графика (по желанию)
 install_gui
 
 # Готово!
