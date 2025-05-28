@@ -111,32 +111,102 @@ partition_disk() {
 
     echo -e "${YELLOW}» Partitioning disk...${RESET}"
     
-    # Clear disk
-    wipefs -af "$DISK"
-    parted -s "$DISK" mklabel gpt
     
-    # Create partitions
+    if ! wipefs -af "$DISK"; then
+        echo -e "${RED}» Failed to wipe disk!${RESET}"
+        exit 1
+    fi
+
+    
+    if ! parted -s "$DISK" mklabel gpt; then
+        echo -e "${RED}» Failed to create GPT partition table!${RESET}"
+        exit 1
+    fi
+    
+    
     RAM_SIZE=$(free -m | awk '/Mem:/ {print $2}')
-    EFI_SIZE=513
-    SWAP_SIZE=$((RAM_SIZE * 2))  # Double RAM for swap
+    EFI_SIZE=513  
+    SWAP_SIZE=$((RAM_SIZE * 2))  
     
-    parted -s "$DISK" mkpart primary fat32 1MiB ${EFI_SIZE}MiB
-    parted -s "$DISK" set 1 esp on
-    parted -s "$DISK" mkpart primary linux-swap ${EFI_SIZE}MiB $((EFI_SIZE + SWAP_SIZE))MiB
-    parted -s "$DISK" mkpart primary ext4 $((EFI_SIZE + SWAP_SIZE))MiB 100%
     
-    # Format partitions
+    if ! parted -s "$DISK" mkpart primary fat32 1MiB ${EFI_SIZE}MiB; then
+        echo -e "${RED}» Failed to create EFI partition!${RESET}"
+        exit 1
+    fi
+    
+    if ! parted -s "$DISK" set 1 esp on; then
+        echo -e "${RED}» Failed to set ESP flag!${RESET}"
+        exit 1
+    fi
+    
+    if ! parted -s "$DISK" mkpart primary linux-swap ${EFI_SIZE}MiB $((EFI_SIZE + SWAP_SIZE))MiB; then
+        echo -e "${RED}» Failed to create swap partition!${RESET}"
+        exit 1
+    fi
+    
+    if ! parted -s "$DISK" mkpart primary ext4 $((EFI_SIZE + SWAP_SIZE))MiB 100%; then
+        echo -e "${RED}» Failed to create root partition!${RESET}"
+        exit 1
+    fi
+    
+    
     echo -e "${YELLOW}» Formatting partitions...${RESET}"
-    mkfs.fat -F32 "${DISK}p1" || { echo -e "${RED}» Failed to format EFI partition!${RESET}"; exit 1; }
-    mkswap "${DISK}p2" || { echo -e "${RED}» Failed to create swap!${RESET}"; exit 1; }
-    mkfs.ext4 -F "${DISK}p3" || { echo -e "${RED}» Failed to format root partition!${RESET}"; exit 1; }
     
-    # Mount partitions
+    
+    if [[ "$DISK" =~ "nvme" ]]; then
+        EFI_PART="${DISK}p1"
+        SWAP_PART="${DISK}p2"
+        ROOT_PART="${DISK}p3"
+    else
+        EFI_PART="${DISK}1"
+        SWAP_PART="${DISK}2"
+        ROOT_PART="${DISK}3"
+    fi
+
+    if ! mkfs.fat -F32 "$EFI_PART"; then
+        echo -e "${RED}» Failed to format EFI partition!${RESET}"
+        echo -e "${YELLOW}» Trying alternative partition naming...${RESET}"
+        
+        if ! mkfs.fat -F32 "${DISK}1"; then
+            echo -e "${RED}» Completely failed to format EFI partition!${RESET}"
+            exit 1
+        fi
+        EFI_PART="${DISK}1"
+    fi
+    
+    if ! mkswap "$SWAP_PART"; then
+        echo -e "${RED}» Failed to create swap!${RESET}"
+        exit 1
+    fi
+    
+    if ! mkfs.ext4 -F "$ROOT_PART"; then
+        echo -e "${RED}» Failed to format root partition!${RESET}"
+        exit 1
+    fi
+    
+    # Монтирование с проверкой
     echo -e "${YELLOW}» Mounting partitions...${RESET}"
-    mount "${DISK}p3" /mnt || { echo -e "${RED}» Failed to mount root partition!${RESET}"; exit 1; }
-    mkdir -p /mnt/boot/efi || { echo -e "${RED}» Failed to create boot directory!${RESET}"; exit 1; }
-    mount "${DISK}p1" /mnt/boot/efi || { echo -e "${RED}» Failed to mount EFI partition!${RESET}"; exit 1; }
-    swapon "${DISK}p2" || { echo -e "${RED}» Failed to enable swap!${RESET}"; exit 1; }
+    if ! mount "$ROOT_PART" /mnt; then
+        echo -e "${RED}» Failed to mount root partition!${RESET}"
+        exit 1
+    fi
+    
+    if ! mkdir -p /mnt/boot/efi; then
+        echo -e "${RED}» Failed to create boot directory!${RESET}"
+        exit 1
+    fi
+    
+    if ! mount "$EFI_PART" /mnt/boot/efi; then
+        echo -e "${RED}» Failed to mount EFI partition!${RESET}"
+        exit 1
+    fi
+    
+    if ! swapon "$SWAP_PART"; then
+        echo -e "${RED}» Failed to enable swap!${RESET}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}» Disk prepared successfully!${RESET}"
 }
 
 # --- System installation ---
