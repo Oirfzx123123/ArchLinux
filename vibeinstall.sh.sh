@@ -2,28 +2,28 @@
 
 # =============================================
 # vibeinstall
-# Автор: NTFSDEV 
+# Author: NTFSDEV 
 # =============================================
 
-# --- Цвета для красоты ---
+# --- Colors for output ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# --- Проверка на root ---
+# --- Check for root ---
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}Ошибка: Скрипт должен запускаться от root!${NC}"
+    echo -e "${RED}Error: This script must be run as root!${NC}"
     exit 1
 fi
 
-# --- Выбор ядра ---
+# --- Kernel selection ---
 kernel_menu() {
-    echo -e "${GREEN}Выбери ядро:${NC}"
-    echo "1) Стандартное (linux)"
+    echo -e "${GREEN}Select kernel:${NC}"
+    echo "1) Standard (linux)"
     echo "2) LTS (linux-lts)"
     echo "3) Zen (linux-zen)"
-    echo -n "Твой выбор (1/2/3): "
+    echo -n "Your choice (1/2/3): "
     read kernel_choice
 
     case $kernel_choice in
@@ -34,196 +34,196 @@ kernel_menu() {
     esac
 }
 
-# --- Настройка сети (Wi-Fi/Ethernet) ---
+# --- Network setup (Wi-Fi/Ethernet) ---
 setup_network() {
-    echo -e "${YELLOW}Настраиваю сеть...${NC}"
+    echo -e "${YELLOW}Configuring network...${NC}"
 
-    # Ethernet (если есть)
+    # Ethernet (if available)
     if ip link show eth0 &>/dev/null; then
-        echo -e "${GREEN}Найден Ethernet, настраиваю...${NC}"
+        echo -e "${GREEN}Ethernet detected, configuring...${NC}"
         dhcpcd eth0
     fi
 
-    # Wi-Fi (через iwd)
+    # Wi-Fi (using iwd)
     if ip link show wlan0 &>/dev/null; then
-        echo -e "${GREEN}Найден Wi-Fi, введи данные:${NC}"
-        echo -n "SSID сети: "
+        echo -e "${GREEN}Wi-Fi detected, enter credentials:${NC}"
+        echo -n "SSID: "
         read wifi_ssid
-        echo -n "Пароль: "
+        echo -n "Password: "
         read -s wifi_pass
         echo
 
-        # Настройка через iwd
+        # Configure using iwd
         iwctl station wlan0 scan
         iwctl station wlan0 connect "$wifi_ssid" --passphrase "$wifi_pass"
         dhcpcd wlan0
     fi
 
-    # Проверка интернета
+    # Internet check
     if ! ping -c 3 archlinux.org &>/dev/null; then
-        echo -e "${RED}Нет интернета! Проверь настройки сети.${NC}"
+        echo -e "${RED}No internet connection! Check network settings.${NC}"
         exit 1
     fi
 }
 
-# --- Выбор Dual Boot ---
+# --- Dual Boot selection ---
 dual_boot_choice() {
-    echo -n -e "${GREEN}Установить Dual Boot с Windows? (y/N): ${NC}"
+    echo -n -e "${GREEN}Enable Dual Boot with Windows? (y/N): ${NC}"
     read dual_boot
     if [[ $dual_boot == [yY] ]]; then
         DUAL_BOOT=true
-        echo -e "${YELLOW}Режим Dual Boot активирован${NC}"
+        echo -e "${YELLOW}Dual Boot mode activated${NC}"
     else
         DUAL_BOOT=false
-        echo -e "${YELLOW}Будет установлен только Arch Linux${NC}"
+        echo -e "${YELLOW}Only Arch Linux will be installed${NC}"
     fi
 }
 
-# --- Разметка диска (авто/GPT) ---
+# --- Disk partitioning (auto/GPT) ---
 auto_partition() {
-    echo -e "${YELLOW}Выбери диск для установки:${NC}"
+    echo -e "${YELLOW}Select installation disk:${NC}"
     lsblk -d -o NAME,SIZE,MODEL
-    echo -n "Имя диска (например, sda/nvme0n1): "
+    echo -n "Disk name (e.g., sda/nvme0n1): "
     read DISK
 
-    # Очистка диска (GPT)
-    echo -e "${RED}ВНИМАНИЕ! Весь диск /dev/${DISK} будет очищен!${NC}"
-    read -p "Подтверди (y/N): " confirm
+    # Disk cleanup (GPT)
+    echo -e "${RED}WARNING! All data on /dev/${DISK} will be erased!${NC}"
+    read -p "Confirm (y/N): " confirm
     [[ $confirm != [yY] ]] && exit 1
 
     parted -s /dev/${DISK} mklabel gpt
 
-    # Создание разделов:
+    # Create partitions:
     # 1. EFI (500M)
-    # 2. Swap (размер = RAM)
-    # 3. Root (всё остальное)
+    # 2. Swap (size = RAM)
+    # 3. Root (remaining space)
     RAM_SIZE=$(free -m | awk '/Mem:/ {print $2}')
     parted -s /dev/${DISK} mkpart primary fat32 1MiB 501MiB
     parted -s /dev/${DISK} set 1 esp on
     parted -s /dev/${DISK} mkpart primary linux-swap 501MiB $(($RAM_SIZE + 501))MiB
     parted -s /dev/${DISK} mkpart primary ext4 $(($RAM_SIZE + 501))MiB 100%
 
-    # Форматирование
+    # Formatting
     mkfs.fat -F32 /dev/${DISK}1
     mkswap /dev/${DISK}2
     mkfs.ext4 /dev/${DISK}3
 
-    # Монтирование
+    # Mounting
     mount /dev/${DISK}3 /mnt
     mkdir -p /mnt/boot/efi
     mount /dev/${DISK}1 /mnt/boot/efi
     swapon /dev/${DISK}2
 }
 
-# --- Установка системы ---
+# --- System installation ---
 install_arch() {
-    echo -e "${YELLOW}Качаю и ставлю Arch Linux...${NC}"
+    echo -e "${YELLOW}Downloading and installing Arch Linux...${NC}"
     pacstrap /mnt base base-devel $KERNEL linux-firmware
 
     # Fstab
     genfstab -U /mnt >> /mnt/etc/fstab
 }
 
-# --- Настройка системы ---
+# --- System configuration ---
 configure_system() {
-    # Часовой пояс (Москва)
+    # Timezone (Moscow)
     arch-chroot /mnt ln -sf /usr/share/zoneinfo/Europe/Moscow /etc/localtime
     arch-chroot /mnt hwclock --systohc
 
-    # Локали
+    # Locales
     echo "en_US.UTF-8 UTF-8" >> /mnt/etc/locale.gen
     echo "ru_RU.UTF-8 UTF-8" >> /mnt/etc/locale.gen
     arch-chroot /mnt locale-gen
     echo "LANG=en_US.UTF-8" > /mnt/etc/locale.conf
 
-    # Имя ПК
+    # Hostname
     echo "vibearch" > /mnt/etc/hostname
     echo "127.0.0.1 localhost" >> /mnt/etc/hosts
     echo "::1 localhost" >> /mnt/etc/hosts
     echo "127.0.1.1 vibearch.localdomain vibearch" >> /mnt/etc/hosts
 
-    # Пароль root
-    echo -e "${GREEN}Задай пароль для root:${NC}"
+    # Root password
+    echo -e "${GREEN}Set root password:${NC}"
     arch-chroot /mnt passwd
 }
 
-# --- Установка загрузчика (GRUB) ---
+# --- Bootloader installation (GRUB) ---
 install_grub() {
-    echo -e "${YELLOW}Ставлю GRUB...${NC}"
+    echo -e "${YELLOW}Installing GRUB...${NC}"
     arch-chroot /mnt pacman -S --noconfirm grub efibootmgr os-prober
     arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
 
-    # Настройка Dual Boot если выбран
+    # Dual Boot configuration if selected
     if $DUAL_BOOT; then
-        echo -e "${GREEN}Настраиваю Dual Boot с Windows...${NC}"
+        echo -e "${GREEN}Configuring Dual Boot with Windows...${NC}"
         echo "GRUB_DISABLE_OS_PROBER=false" >> /mnt/etc/default/grub
     fi
 
     arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
 }
 
-# --- Создание пользователя ---
+# --- User creation ---
 create_user() {
-    echo -n "Введи имя пользователя: "
+    echo -n "Enter username: "
     read USERNAME
     arch-chroot /mnt useradd -m -G wheel -s /bin/bash "$USERNAME"
-    echo -e "${GREEN}Задай пароль для $USERNAME:${NC}"
+    echo -e "${GREEN}Set password for $USERNAME:${NC}"
     arch-chroot /mnt passwd "$USERNAME"
 
     # Sudo
     echo "%wheel ALL=(ALL) ALL" >> /mnt/etc/sudoers
 }
 
-# --- Дополнительные пакеты (сеть, звук) ---
+# --- Additional packages (network, audio) ---
 install_extras() {
     arch-chroot /mnt pacman -S --noconfirm networkmanager sudo pipewire pulseaudio
     arch-chroot /mnt systemctl enable NetworkManager
 }
 
-# --- Графика (опционально) ---
+# --- GUI (optional) ---
 install_gui() {
-    read -p "Хочешь графическую оболочку? (y/N): " gui_choice
+    read -p "Install GUI? (y/N): " gui_choice
     if [[ $gui_choice == [yY] ]]; then
-        echo -e "${GREEN}Ставлю GNOME...${NC}"
+        echo -e "${GREEN}Installing GNOME...${NC}"
         arch-chroot /mnt pacman -S --noconfirm xorg gnome gnome-extra gdm
         arch-chroot /mnt systemctl enable gdm
     fi
 }
 
-# ===== ЗАПУСК =====
+# ===== MAIN =====
 clear
 echo -e "${GREEN}=== VibeArchInstall 2.1 (FULL AUTO) ===${NC}"
 
-# 1. Выбор ядра
+# 1. Kernel selection
 kernel_menu
 
-# 2. Настройка сети
+# 2. Network setup
 setup_network
 
-# 3. Выбор Dual Boot
+# 3. Dual Boot choice
 dual_boot_choice
 
-# 4. Разметка диска
+# 4. Disk partitioning
 auto_partition
 
-# 5. Установка Arch
+# 5. Arch installation
 install_arch
 
-# 6. Настройка системы
+# 6. System configuration
 configure_system
 
-# 7. GRUB (с учетом выбора Dual Boot)
+# 7. GRUB (with Dual Boot option)
 install_grub
 
-# 8. Пользователь
+# 8. User creation
 create_user
 
-# 9. Допы
+# 9. Additional packages
 install_extras
 
-# 10. Графика (по желанию)
+# 10. GUI (optional)
 install_gui
 
-# Готово!
-echo -e "${GREEN}Установка завершена!${NC}"
-echo -e "Команда для перезагрузки: ${YELLOW}umount -R /mnt && reboot${NC}"
+# Done!
+echo -e "${GREEN}Installation complete!${NC}"
+echo -e "Reboot command: ${YELLOW}umount -R /mnt && reboot${NC}"
