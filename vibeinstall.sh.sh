@@ -102,57 +102,56 @@ select_disk() {
 partition_disk() {
     local DISK=$1
     
-    echo -e "${RED}${BOLD}:: WARNING ::${RESET}"
-    echo -e "${RED}All data on $DISK will be erased!${RESET}"
-    read -p "${BLUE}? Confirm (type 'YES' to continue): ${RESET}" confirm
+    echo -e "${YELLOW}=== Preparing Disk ${DISK} ===${NC}"
     
-    if [[ "$confirm" != "YES" ]]; then
-        echo -e "${YELLOW}» Installation canceled${RESET}"
-        exit 0
-    fi
-
-    echo -e "${YELLOW}» Partitioning disk...${RESET}"
-    
-    # Clean disk
-    if ! wipefs -af "$DISK"; then
-        echo -e "${RED}» Failed to wipe disk!${RESET}"
-        exit 1
-    fi
-
-    # Create partition table
-    if ! parted -s "$DISK" mklabel gpt; then
-        echo -e "${RED}» Failed to create GPT partition table!${RESET}"
-        exit 1
+    # 1. Полная очистка диска
+    echo -e "${GREEN}[1/7] Wiping disk...${NC}"
+    if ! wipefs -a -f $DISK; then
+        echo -e "${RED}ERROR: Failed to wipe disk!${NC}"
+        echo -e "${YELLOW}Trying alternative method...${NC}"
+        dd if=/dev/zero of=$DISK bs=1M count=100 status=progress
     fi
     
-    # Calculate sizes
+    # 2. Создание GPT таблицы
+    echo -e "${GREEN}[2/7] Creating GPT partition table...${NC}"
+    for i in {1..3}; do  # 3 попытки
+        if parted -s $DISK mklabel gpt; then
+            break
+        else
+            echo -e "${YELLOW}Attempt ${i} failed, retrying...${NC}"
+            sleep 1
+            if [ $i -eq 3 ]; then
+                echo -e "${RED}ERROR: Failed to create GPT table after 3 attempts!${NC}"
+                echo -e "${YELLOW}Possible solutions:${NC}"
+                echo "1. Close all programs using this disk"
+                echo "2. Reboot and try again"
+                echo "3. Check disk for hardware errors"
+                exit 1
+            fi
+        fi
+    done
+    
+    # 3. Расчет размеров
     RAM_SIZE=$(free -m | awk '/Mem:/ {print $2}')
-    EFI_SIZE=512  # 512MB for EFI
-    SWAP_SIZE=$((RAM_SIZE * 2))  # 2x RAM for swap
+    EFI_SIZE=512       # 512MB для EFI
+    SWAP_SIZE=$((RAM_SIZE * 2))  # 2x RAM для swap
     
-    # Create partitions
-    if ! parted -s "$DISK" mkpart primary fat32 1MiB ${EFI_SIZE}MiB; then
-        echo -e "${RED}» Failed to create EFI partition!${RESET}"
-        exit 1
-    fi
+    # 4. Создание разделов с проверкой
+    echo -e "${GREEN}[3/7] Creating partitions...${NC}"
+    parted -s $DISK mkpart primary fat32 1MiB ${EFI_SIZE}MiB || {
+        echo -e "${RED}ERROR: Failed to create EFI partition!${NC}"; exit 1; }
     
-    if ! parted -s "$DISK" set 1 esp on; then
-        echo -e "${RED}» Failed to set ESP flag!${RESET}"
-        exit 1
-    fi
+    parted -s $DISK set 1 esp on || {
+        echo -e "${RED}ERROR: Failed to set ESP flag!${NC}"; exit 1; }
     
-    if ! parted -s "$DISK" mkpart primary linux-swap ${EFI_SIZE}MiB $((EFI_SIZE + SWAP_SIZE))MiB; then
-        echo -e "${RED}» Failed to create swap partition!${RESET}"
-        exit 1
-    fi
+    parted -s $DISK mkpart primary linux-swap ${EFI_SIZE}MiB $((EFI_SIZE + SWAP_SIZE))MiB || {
+        echo -e "${RED}ERROR: Failed to create swap partition!${NC}"; exit 1; }
     
-    if ! parted -s "$DISK" mkpart primary ext4 $((EFI_SIZE + SWAP_SIZE))MiB 100%; then
-        echo -e "${RED}» Failed to create root partition!${RESET}"
-        exit 1
-    fi
+    parted -s $DISK mkpart primary ext4 $((EFI_SIZE + SWAP_SIZE))MiB 100% || {
+        echo -e "${RED}ERROR: Failed to create root partition!${NC}"; exit 1; }
     
-    # Determine partition names
-    if [[ "$DISK" =~ "nvme" ]]; then
+    # 5. Определение имен разделов
+    if [[ $DISK == *"nvme"* ]]; then
         EFI_PART="${DISK}p1"
         SWAP_PART="${DISK}p2"
         ROOT_PART="${DISK}p3"
@@ -161,50 +160,45 @@ partition_disk() {
         SWAP_PART="${DISK}2"
         ROOT_PART="${DISK}3"
     fi
-
-    # Format partitions
-    echo -e "${YELLOW}» Formatting partitions...${RESET}"
     
-    if ! mkfs.fat -F32 "$EFI_PART"; then
-        echo -e "${RED}» Failed to format EFI partition!${RESET}"
-        exit 1
-    fi
+    # 6. Форматирование разделов
+    echo -e "${GREEN}[4/7] Formatting EFI partition...${NC}"
+    mkfs.fat -F32 $EFI_PART || {
+        echo -e "${RED}ERROR: Failed to format EFI partition!${NC}"
+        echo -e "${YELLOW}Trying alternative partition name...${NC}"
+        mkfs.fat -F32 ${DISK}1 || {
+            echo -e "${RED}ERROR: Completely failed to format EFI partition!${NC}"
+            exit 1
+        }
+        EFI_PART="${DISK}1"
+    }
     
-    if ! mkswap "$SWAP_PART"; then
-        echo -e "${RED}» Failed to create swap!${RESET}"
-        exit 1
-    fi
+    echo -e "${GREEN}[5/7] Setting up swap...${NC}"
+    mkswap $SWAP_PART || {
+        echo -e "${RED}ERROR: Failed to create swap!${NC}"; exit 1; }
     
-    if ! mkfs.ext4 -F "$ROOT_PART"; then
-        echo -e "${RED}» Failed to format root partition!${RESET}"
-        exit 1
-    fi
+    echo -e "${GREEN}[6/7] Formatting root partition...${NC}"
+    mkfs.ext4 -F $ROOT_PART || {
+        echo -e "${RED}ERROR: Failed to format root partition!${NC}"; exit 1; }
     
-    # Mount partitions
-    echo -e "${YELLOW}» Mounting partitions...${RESET}"
-    if ! mount "$ROOT_PART" /mnt; then
-        echo -e "${RED}» Failed to mount root partition!${RESET}"
-        exit 1
-    fi
+    # 7. Монтирование
+    echo -e "${GREEN}[7/7] Mounting partitions...${NC}"
+    mount $ROOT_PART /mnt || {
+        echo -e "${RED}ERROR: Failed to mount root partition!${NC}"; exit 1; }
     
-    if ! mkdir -p /mnt/boot/efi; then
-        echo -e "${RED}» Failed to create boot directory!${RESET}"
-        exit 1
-    fi
+    mkdir -p /mnt/boot/efi || {
+        echo -e "${RED}ERROR: Failed to create boot directory!${NC}"; exit 1; }
     
-    if ! mount "$EFI_PART" /mnt/boot/efi; then
-        echo -e "${RED}» Failed to mount EFI partition!${RESET}"
-        exit 1
-    fi
+    mount $EFI_PART /mnt/boot/efi || {
+        echo -e "${RED}ERROR: Failed to mount EFI partition!${NC}"; exit 1; }
     
-    if ! swapon "$SWAP_PART"; then
-        echo -e "${YELLOW}» Warning: Failed to enable swap! Continuing...${RESET}"
-    fi
+    swapon $SWAP_PART || {
+        echo -e "${YELLOW}WARNING: Failed to enable swap! Continuing...${NC}"; }
     
-    echo -e "${GREEN}» Disk prepared successfully!${RESET}"
-    lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT "$DISK"
+    echo -e "${GREEN}Disk partitioned successfully!${NC}"
+    echo -e "EFI: $EFI_PART, Swap: $SWAP_PART, Root: $ROOT_PART"
+    lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT $DISK
 }
-
 # --- System installation ---
 install_system() {
     echo -e "${YELLOW}${BOLD}:: System Installation ::${RESET}"
