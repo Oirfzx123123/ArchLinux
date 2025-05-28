@@ -2,8 +2,8 @@
 
 # =============================================
 # VibeInstall - Arch Linux Installer
+# Fixed Disk Partitioning Version
 # Created by NTFSDEV
-# Inspired by Archinstall
 # =============================================
 
 # --- Colors and styles ---
@@ -84,7 +84,7 @@ setup_network() {
 select_disk() {
     echo -e "${YELLOW}${BOLD}:: Disk Selection ::${RESET}"
     echo -e "${BLUE}Available disks:${RESET}"
-    lsblk -d -o NAME,SIZE,MODEL
+    lsblk -d -o NAME,SIZE,MODEL | grep -v 'loop' | grep -v 'sr[0-9]'
     
     while true; do
         read -p "${BLUE}? Enter disk name (e.g., sda/nvme0n1): ${RESET}" DISK
@@ -99,39 +99,60 @@ select_disk() {
 }
 
 # --- Partitioning ---
-# --- Disk Partitioning Function ---
 partition_disk() {
     local DISK=$1
     
-    echo -e "${YELLOW}=== Preparing Disk ${DISK} ===${NC}"
+    echo -e "${RED}${BOLD}:: WARNING ::${RESET}"
+    echo -e "${RED}All data on $DISK will be erased!${RESET}"
+    read -p "${BLUE}? Confirm (type 'YES' to continue): ${RESET}" confirm
+    
+    if [[ "$confirm" != "YES" ]]; then
+        echo -e "${YELLOW}» Installation canceled${RESET}"
+        exit 0
+    fi
+
+    echo -e "${YELLOW}» Partitioning disk...${RESET}"
     
     # Clean disk
-    echo -e "${GREEN}[1/6] Cleaning disk...${NC}"
-    wipefs -af $DISK
-    parted -s $DISK mklabel gpt
-    
-    # Calculate sizes (in MB)
-    RAM_SIZE=$(free -m | awk '/Mem:/ {print $2}')
-    EFI_SIZE=512       # 512MB for EFI
-    SWAP_SIZE=$RAM_SIZE # Equal to RAM size
-    ROOT_MIN=10240     # 10GB minimum for root
-    
-    # Verify disk size
-    DISK_SIZE=$(parted -s $DISK unit MB print free | grep 'Free Space' | tail -1 | awk '{print $2}' | tr -d 'MB')
-    if [ $DISK_SIZE -lt $((EFI_SIZE + SWAP_SIZE + ROOT_MIN)) ]; then
-        echo -e "${RED}Error: Disk too small! Need at least $((EFI_SIZE + SWAP_SIZE + ROOT_MIN))MB${NC}"
+    if ! wipefs -af "$DISK"; then
+        echo -e "${RED}» Failed to wipe disk!${RESET}"
+        exit 1
+    fi
+
+    # Create partition table
+    if ! parted -s "$DISK" mklabel gpt; then
+        echo -e "${RED}» Failed to create GPT partition table!${RESET}"
         exit 1
     fi
     
+    # Calculate sizes
+    RAM_SIZE=$(free -m | awk '/Mem:/ {print $2}')
+    EFI_SIZE=512  # 512MB for EFI
+    SWAP_SIZE=$((RAM_SIZE * 2))  # 2x RAM for swap
+    
     # Create partitions
-    echo -e "${GREEN}[2/6] Creating partitions...${NC}"
-    parted -s $DISK mkpart primary fat32 1MiB ${EFI_SIZE}MiB
-    parted -s $DISK set 1 esp on
-    parted -s $DISK mkpart primary linux-swap ${EFI_SIZE}MiB $((EFI_SIZE + SWAP_SIZE))MiB
-    parted -s $DISK mkpart primary ext4 $((EFI_SIZE + SWAP_SIZE))MiB 100%
+    if ! parted -s "$DISK" mkpart primary fat32 1MiB ${EFI_SIZE}MiB; then
+        echo -e "${RED}» Failed to create EFI partition!${RESET}"
+        exit 1
+    fi
+    
+    if ! parted -s "$DISK" set 1 esp on; then
+        echo -e "${RED}» Failed to set ESP flag!${RESET}"
+        exit 1
+    fi
+    
+    if ! parted -s "$DISK" mkpart primary linux-swap ${EFI_SIZE}MiB $((EFI_SIZE + SWAP_SIZE))MiB; then
+        echo -e "${RED}» Failed to create swap partition!${RESET}"
+        exit 1
+    fi
+    
+    if ! parted -s "$DISK" mkpart primary ext4 $((EFI_SIZE + SWAP_SIZE))MiB 100%; then
+        echo -e "${RED}» Failed to create root partition!${RESET}"
+        exit 1
+    fi
     
     # Determine partition names
-    if [[ $DISK == *"nvme"* ]]; then
+    if [[ "$DISK" =~ "nvme" ]]; then
         EFI_PART="${DISK}p1"
         SWAP_PART="${DISK}p2"
         ROOT_PART="${DISK}p3"
@@ -140,78 +161,49 @@ partition_disk() {
         SWAP_PART="${DISK}2"
         ROOT_PART="${DISK}3"
     fi
-    
+
     # Format partitions
-    echo -e "${GREEN}[3/6] Formatting EFI partition...${NC}"
-    mkfs.fat -F32 $EFI_PART || {
-        echo -e "${RED}Error formatting EFI partition! Trying alternative...${NC}"
-        mkfs.fat -F32 ${DISK}1 || {
-            echo -e "${RED}Failed to format EFI partition!${NC}"
-            exit 1
-        }
-        EFI_PART="${DISK}1"
-    }
+    echo -e "${YELLOW}» Formatting partitions...${RESET}"
     
-    echo -e "${GREEN}[4/6] Setting up swap...${NC}"
-    mkswap $SWAP_PART || {
-        echo -e "${RED}Failed to create swap!${NC}"
+    if ! mkfs.fat -F32 "$EFI_PART"; then
+        echo -e "${RED}» Failed to format EFI partition!${RESET}"
         exit 1
-    }
+    fi
     
-    echo -e "${GREEN}[5/6] Formatting root partition...${NC}"
-    mkfs.ext4 -F $ROOT_PART || {
-        echo -e "${RED}Failed to format root partition!${NC}"
+    if ! mkswap "$SWAP_PART"; then
+        echo -e "${RED}» Failed to create swap!${RESET}"
         exit 1
-    }
+    fi
+    
+    if ! mkfs.ext4 -F "$ROOT_PART"; then
+        echo -e "${RED}» Failed to format root partition!${RESET}"
+        exit 1
+    fi
     
     # Mount partitions
-    echo -e "${GREEN}[6/6] Mounting partitions...${NC}"
-    mount $ROOT_PART /mnt || {
-        echo -e "${RED}Failed to mount root partition!${NC}"
+    echo -e "${YELLOW}» Mounting partitions...${RESET}"
+    if ! mount "$ROOT_PART" /mnt; then
+        echo -e "${RED}» Failed to mount root partition!${RESET}"
         exit 1
-    }
+    fi
     
-    mkdir -p /mnt/boot/efi
-    mount $EFI_PART /mnt/boot/efi || {
-        echo -e "${RED}Failed to mount EFI partition!${NC}"
+    if ! mkdir -p /mnt/boot/efi; then
+        echo -e "${RED}» Failed to create boot directory!${RESET}"
         exit 1
-    }
+    fi
     
-    swapon $SWAP_PART || {
-        echo -e "${YELLOW}Warning: Failed to enable swap! Continuing...${NC}"
-    }
+    if ! mount "$EFI_PART" /mnt/boot/efi; then
+        echo -e "${RED}» Failed to mount EFI partition!${RESET}"
+        exit 1
+    fi
     
-    echo -e "${GREEN}Disk partitioned successfully!${NC}"
-    echo -e "EFI: $EFI_PART, Swap: $SWAP_PART, Root: $ROOT_PART"
+    if ! swapon "$SWAP_PART"; then
+        echo -e "${YELLOW}» Warning: Failed to enable swap! Continuing...${RESET}"
+    fi
+    
+    echo -e "${GREEN}» Disk prepared successfully!${RESET}"
+    lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT "$DISK"
 }
-
-# --- Main ---
-clear
-echo -e "${GREEN}=== VibeInstall Disk Setup ===${NC}"
-
-# Select disk
-echo -e "${YELLOW}Available disks:${NC}"
-lsblk -d -o NAME,SIZE,MODEL
-
-read -p "Enter disk name (e.g., sda/nvme0n1): " disk_choice
-DISK="/dev/$disk_choice"
-
-# Verify disk exists
-if [ ! -b $DISK ]; then
-    echo -e "${RED}Error: Disk $DISK not found!${NC}"
-    exit 1
-fi
-
-# Confirm
-echo -e "${RED}WARNING: All data on $DISK will be erased!${NC}"
-read -p "Continue? (y/N): " confirm
-if [[ $confirm != [yY] ]]; then
-    echo -e "${YELLOW}Operation canceled.${NC}"
-    exit 0
-fi
-
-# Execute partitioning
-partition_disk $DISK
 
 # --- System installation ---
 install_system() {
@@ -230,10 +222,16 @@ install_system() {
     
     # Install base system
     echo -e "${YELLOW}» Installing base system...${RESET}"
-    pacstrap /mnt base base-devel $KERNEL_PKGS linux-firmware || { echo -e "${RED}» Installation failed!${RESET}"; exit 1; }
+    if ! pacstrap /mnt base base-devel $KERNEL_PKGS linux-firmware; then
+        echo -e "${RED}» Installation failed!${RESET}"
+        exit 1
+    fi
     
     # Generate fstab
-    genfstab -U /mnt >> /mnt/etc/fstab || { echo -e "${RED}» Failed to generate fstab!${RESET}"; exit 1; }
+    if ! genfstab -U /mnt >> /mnt/etc/fstab; then
+        echo -e "${RED}» Failed to generate fstab!${RESET}"
+        exit 1
+    fi
 }
 
 # --- System configuration ---
@@ -285,6 +283,12 @@ install_bootloader() {
     # Install GRUB
     arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck
     arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+    
+    # Verify installation
+    if [[ ! -f /mnt/boot/efi/EFI/GRUB/grubx64.efi ]]; then
+        echo -e "${RED}» GRUB installation failed!${RESET}"
+        exit 1
+    fi
 }
 
 # --- User creation ---
@@ -327,7 +331,7 @@ main() {
     check_uefi
     setup_network
     select_disk
-    partition_disk
+    partition_disk "$DISK"
     install_system
     configure_system
     install_bootloader
