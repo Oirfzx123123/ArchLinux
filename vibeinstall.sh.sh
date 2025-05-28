@@ -99,61 +99,39 @@ select_disk() {
 }
 
 # --- Partitioning ---
+# --- Disk Partitioning Function ---
 partition_disk() {
-    echo -e "${RED}${BOLD}:: WARNING ::${RESET}"
-    echo -e "${RED}All data on $DISK will be erased!${RESET}"
-    read -p "${BLUE}? Confirm (y/N): ${RESET}" confirm
+    local DISK=$1
     
-    if [[ "$confirm" != [yY] ]]; then
-        echo -e "${YELLOW}» Installation canceled${RESET}"
-        exit 0
-    fi
-
-    echo -e "${YELLOW}» Partitioning disk...${RESET}"
+    echo -e "${YELLOW}=== Preparing Disk ${DISK} ===${NC}"
     
+    # Clean disk
+    echo -e "${GREEN}[1/6] Cleaning disk...${NC}"
+    wipefs -af $DISK
+    parted -s $DISK mklabel gpt
     
-    if ! wipefs -af "$DISK"; then
-        echo -e "${RED}» Failed to wipe disk!${RESET}"
-        exit 1
-    fi
-
-    
-    if ! parted -s "$DISK" mklabel gpt; then
-        echo -e "${RED}» Failed to create GPT partition table!${RESET}"
-        exit 1
-    fi
-    
-    
+    # Calculate sizes (in MB)
     RAM_SIZE=$(free -m | awk '/Mem:/ {print $2}')
-    EFI_SIZE=513  
-    SWAP_SIZE=$((RAM_SIZE * 2))  
+    EFI_SIZE=512       # 512MB for EFI
+    SWAP_SIZE=$RAM_SIZE # Equal to RAM size
+    ROOT_MIN=10240     # 10GB minimum for root
     
-    
-    if ! parted -s "$DISK" mkpart primary fat32 1MiB ${EFI_SIZE}MiB; then
-        echo -e "${RED}» Failed to create EFI partition!${RESET}"
+    # Verify disk size
+    DISK_SIZE=$(parted -s $DISK unit MB print free | grep 'Free Space' | tail -1 | awk '{print $2}' | tr -d 'MB')
+    if [ $DISK_SIZE -lt $((EFI_SIZE + SWAP_SIZE + ROOT_MIN)) ]; then
+        echo -e "${RED}Error: Disk too small! Need at least $((EFI_SIZE + SWAP_SIZE + ROOT_MIN))MB${NC}"
         exit 1
     fi
     
-    if ! parted -s "$DISK" set 1 esp on; then
-        echo -e "${RED}» Failed to set ESP flag!${RESET}"
-        exit 1
-    fi
+    # Create partitions
+    echo -e "${GREEN}[2/6] Creating partitions...${NC}"
+    parted -s $DISK mkpart primary fat32 1MiB ${EFI_SIZE}MiB
+    parted -s $DISK set 1 esp on
+    parted -s $DISK mkpart primary linux-swap ${EFI_SIZE}MiB $((EFI_SIZE + SWAP_SIZE))MiB
+    parted -s $DISK mkpart primary ext4 $((EFI_SIZE + SWAP_SIZE))MiB 100%
     
-    if ! parted -s "$DISK" mkpart primary linux-swap ${EFI_SIZE}MiB $((EFI_SIZE + SWAP_SIZE))MiB; then
-        echo -e "${RED}» Failed to create swap partition!${RESET}"
-        exit 1
-    fi
-    
-    if ! parted -s "$DISK" mkpart primary ext4 $((EFI_SIZE + SWAP_SIZE))MiB 100%; then
-        echo -e "${RED}» Failed to create root partition!${RESET}"
-        exit 1
-    fi
-    
-    
-    echo -e "${YELLOW}» Formatting partitions...${RESET}"
-    
-    
-    if [[ "$DISK" =~ "nvme" ]]; then
+    # Determine partition names
+    if [[ $DISK == *"nvme"* ]]; then
         EFI_PART="${DISK}p1"
         SWAP_PART="${DISK}p2"
         ROOT_PART="${DISK}p3"
@@ -162,52 +140,78 @@ partition_disk() {
         SWAP_PART="${DISK}2"
         ROOT_PART="${DISK}3"
     fi
-
-    if ! mkfs.fat -F32 "$EFI_PART"; then
-        echo -e "${RED}» Failed to format EFI partition!${RESET}"
-        echo -e "${YELLOW}» Trying alternative partition naming...${RESET}"
-        
-        if ! mkfs.fat -F32 "${DISK}1"; then
-            echo -e "${RED}» Completely failed to format EFI partition!${RESET}"
+    
+    # Format partitions
+    echo -e "${GREEN}[3/6] Formatting EFI partition...${NC}"
+    mkfs.fat -F32 $EFI_PART || {
+        echo -e "${RED}Error formatting EFI partition! Trying alternative...${NC}"
+        mkfs.fat -F32 ${DISK}1 || {
+            echo -e "${RED}Failed to format EFI partition!${NC}"
             exit 1
-        fi
+        }
         EFI_PART="${DISK}1"
-    fi
+    }
     
-    if ! mkswap "$SWAP_PART"; then
-        echo -e "${RED}» Failed to create swap!${RESET}"
+    echo -e "${GREEN}[4/6] Setting up swap...${NC}"
+    mkswap $SWAP_PART || {
+        echo -e "${RED}Failed to create swap!${NC}"
         exit 1
-    fi
+    }
     
-    if ! mkfs.ext4 -F "$ROOT_PART"; then
-        echo -e "${RED}» Failed to format root partition!${RESET}"
+    echo -e "${GREEN}[5/6] Formatting root partition...${NC}"
+    mkfs.ext4 -F $ROOT_PART || {
+        echo -e "${RED}Failed to format root partition!${NC}"
         exit 1
-    fi
+    }
     
-    # Монтирование с проверкой
-    echo -e "${YELLOW}» Mounting partitions...${RESET}"
-    if ! mount "$ROOT_PART" /mnt; then
-        echo -e "${RED}» Failed to mount root partition!${RESET}"
+    # Mount partitions
+    echo -e "${GREEN}[6/6] Mounting partitions...${NC}"
+    mount $ROOT_PART /mnt || {
+        echo -e "${RED}Failed to mount root partition!${NC}"
         exit 1
-    fi
+    }
     
-    if ! mkdir -p /mnt/boot/efi; then
-        echo -e "${RED}» Failed to create boot directory!${RESET}"
+    mkdir -p /mnt/boot/efi
+    mount $EFI_PART /mnt/boot/efi || {
+        echo -e "${RED}Failed to mount EFI partition!${NC}"
         exit 1
-    fi
+    }
     
-    if ! mount "$EFI_PART" /mnt/boot/efi; then
-        echo -e "${RED}» Failed to mount EFI partition!${RESET}"
-        exit 1
-    fi
+    swapon $SWAP_PART || {
+        echo -e "${YELLOW}Warning: Failed to enable swap! Continuing...${NC}"
+    }
     
-    if ! swapon "$SWAP_PART"; then
-        echo -e "${RED}» Failed to enable swap!${RESET}"
-        exit 1
-    fi
-    
-    echo -e "${GREEN}» Disk prepared successfully!${RESET}"
+    echo -e "${GREEN}Disk partitioned successfully!${NC}"
+    echo -e "EFI: $EFI_PART, Swap: $SWAP_PART, Root: $ROOT_PART"
 }
+
+# --- Main ---
+clear
+echo -e "${GREEN}=== VibeInstall Disk Setup ===${NC}"
+
+# Select disk
+echo -e "${YELLOW}Available disks:${NC}"
+lsblk -d -o NAME,SIZE,MODEL
+
+read -p "Enter disk name (e.g., sda/nvme0n1): " disk_choice
+DISK="/dev/$disk_choice"
+
+# Verify disk exists
+if [ ! -b $DISK ]; then
+    echo -e "${RED}Error: Disk $DISK not found!${NC}"
+    exit 1
+fi
+
+# Confirm
+echo -e "${RED}WARNING: All data on $DISK will be erased!${NC}"
+read -p "Continue? (y/N): " confirm
+if [[ $confirm != [yY] ]]; then
+    echo -e "${YELLOW}Operation canceled.${NC}"
+    exit 0
+fi
+
+# Execute partitioning
+partition_disk $DISK
 
 # --- System installation ---
 install_system() {
