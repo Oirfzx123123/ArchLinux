@@ -2,7 +2,7 @@
 
 # =============================================
 # vibeinstall
-# Author: NTFSDEV 
+# NTFSDEV
 # =============================================
 
 # --- Colors for output ---
@@ -17,6 +17,15 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# --- Check UEFI mode ---
+check_uefi() {
+    if [[ ! -d /sys/firmware/efi ]]; then
+        echo -e "${RED}Error: System is not in UEFI mode!${NC}"
+        echo -e "${YELLOW}Please enable UEFI in BIOS and try again.${NC}"
+        exit 1
+    fi
+}
+
 # --- Kernel selection ---
 kernel_menu() {
     echo -e "${GREEN}Select kernel:${NC}"
@@ -27,24 +36,24 @@ kernel_menu() {
     read kernel_choice
 
     case $kernel_choice in
-        1) KERNEL="linux" ;;
-        2) KERNEL="linux-lts" ;;
-        3) KERNEL="linux-zen" ;;
-        *) KERNEL="linux" ;;
+        1) KERNEL="linux linux-headers" ;;
+        2) KERNEL="linux-lts linux-lts-headers" ;;
+        3) KERNEL="linux-zen linux-zen-headers" ;;
+        *) KERNEL="linux linux-headers" ;;
     esac
 }
 
-# --- Network setup (Wi-Fi/Ethernet) ---
+# --- Network setup ---
 setup_network() {
     echo -e "${YELLOW}Configuring network...${NC}"
 
-    # Ethernet (if available)
+    # Ethernet
     if ip link show eth0 &>/dev/null; then
         echo -e "${GREEN}Ethernet detected, configuring...${NC}"
         dhcpcd eth0
     fi
 
-    # Wi-Fi (using iwd)
+    # Wi-Fi
     if ip link show wlan0 &>/dev/null; then
         echo -e "${GREEN}Wi-Fi detected, enter credentials:${NC}"
         echo -n "SSID: "
@@ -53,177 +62,177 @@ setup_network() {
         read -s wifi_pass
         echo
 
-        # Configure using iwd
         iwctl station wlan0 scan
         iwctl station wlan0 connect "$wifi_ssid" --passphrase "$wifi_pass"
         dhcpcd wlan0
     fi
 
-    # Internet check
+    # Verify internet
     if ! ping -c 3 archlinux.org &>/dev/null; then
         echo -e "${RED}No internet connection! Check network settings.${NC}"
         exit 1
     fi
 }
 
-# --- Dual Boot selection ---
-dual_boot_choice() {
-    echo -n -e "${GREEN}Enable Dual Boot with Windows? (y/N): ${NC}"
-    read dual_boot
-    if [[ $dual_boot == [yY] ]]; then
-        DUAL_BOOT=true
-        echo -e "${YELLOW}Dual Boot mode activated${NC}"
-    else
-        DUAL_BOOT=false
-        echo -e "${YELLOW}Only Arch Linux will be installed${NC}"
-    fi
+# --- Disk selection ---
+select_disk() {
+    echo -e "${YELLOW}Available disks:${NC}"
+    lsblk -d -o NAME,SIZE,MODEL
+    echo -n "Enter disk name (e.g., sda/nvme0n1): "
+    read DISK
 }
 
-# --- Disk partitioning (auto/GPT) ---
-auto_partition() {
-    echo -e "${YELLOW}Select installation disk:${NC}"
-    lsblk -d -o NAME,SIZE,MODEL
-    echo -n "Disk name (e.g., sda/nvme0n1): "
-    read DISK
-
-    # Disk cleanup (GPT)
-    echo -e "${RED}WARNING! All data on /dev/${DISK} will be erased!${NC}"
+# --- Partitioning ---
+partition_disk() {
+    echo -e "${RED}WARNING: All data on /dev/${DISK} will be erased!${NC}"
     read -p "Confirm (y/N): " confirm
     [[ $confirm != [yY] ]] && exit 1
 
-    parted -s /dev/${DISK} mklabel gpt
+    # Clear disk
+    wipefs -a /dev/$DISK
+    parted -s /dev/$DISK mklabel gpt
 
-    # Create partitions:
-    # 1. EFI (500M)
-    # 2. Swap (size = RAM)
-    # 3. Root (remaining space)
+    # Create partitions
     RAM_SIZE=$(free -m | awk '/Mem:/ {print $2}')
-    parted -s /dev/${DISK} mkpart primary fat32 1MiB 501MiB
-    parted -s /dev/${DISK} set 1 esp on
-    parted -s /dev/${DISK} mkpart primary linux-swap 501MiB $(($RAM_SIZE + 501))MiB
-    parted -s /dev/${DISK} mkpart primary ext4 $(($RAM_SIZE + 501))MiB 100%
+    parted -s /dev/$DISK mkpart primary fat32 1MiB 513MiB
+    parted -s /dev/$DISK set 1 esp on
+    parted -s /dev/$DISK mkpart primary linux-swap 513MiB $((513 + RAM_SIZE))MiB
+    parted -s /dev/$DISK mkpart primary ext4 $((513 + RAM_SIZE))MiB 100%
 
-    # Formatting
-    mkfs.fat -F32 /dev/${DISK}1
-    mkswap /dev/${DISK}2
-    mkfs.ext4 /dev/${DISK}3
+    # Format partitions
+    mkfs.fat -F32 /dev/${DISK}p1
+    mkswap /dev/${DISK}p2
+    mkfs.ext4 -F /dev/${DISK}p3
 
-    # Mounting
-    mount /dev/${DISK}3 /mnt
+    # Mount partitions
+    mount /dev/${DISK}p3 /mnt
     mkdir -p /mnt/boot/efi
-    mount /dev/${DISK}1 /mnt/boot/efi
-    swapon /dev/${DISK}2
+    mount /dev/${DISK}p1 /mnt/boot/efi
+    swapon /dev/${DISK}p2
 }
 
-# --- System installation ---
-install_arch() {
-    echo -e "${YELLOW}Downloading and installing Arch Linux...${NC}"
+# --- Install base system ---
+install_base() {
+    echo -e "${YELLOW}Installing Arch Linux...${NC}"
     pacstrap /mnt base base-devel $KERNEL linux-firmware
-
-    # Fstab
     genfstab -U /mnt >> /mnt/etc/fstab
 }
 
 # --- System configuration ---
 configure_system() {
-    # Timezone (Moscow)
+    # Timezone
     arch-chroot /mnt ln -sf /usr/share/zoneinfo/Europe/Moscow /etc/localtime
     arch-chroot /mnt hwclock --systohc
 
-    # Locales
+    # Locale
     echo "en_US.UTF-8 UTF-8" >> /mnt/etc/locale.gen
     echo "ru_RU.UTF-8 UTF-8" >> /mnt/etc/locale.gen
     arch-chroot /mnt locale-gen
     echo "LANG=en_US.UTF-8" > /mnt/etc/locale.conf
 
     # Hostname
-    echo "vibearch" > /mnt/etc/hostname
+    echo "archlinux" > /mnt/etc/hostname
     echo "127.0.0.1 localhost" >> /mnt/etc/hosts
     echo "::1 localhost" >> /mnt/etc/hosts
-    echo "127.0.1.1 vibearch.localdomain vibearch" >> /mnt/etc/hosts
+    echo "127.0.1.1 archlinux.localdomain archlinux" >> /mnt/etc/hosts
 
     # Root password
     echo -e "${GREEN}Set root password:${NC}"
     arch-chroot /mnt passwd
 }
 
-# --- Bootloader installation (GRUB) ---
-install_grub() {
-    echo -e "${YELLOW}Installing GRUB...${NC}"
+# --- Install bootloader ---
+install_bootloader() {
+    echo -e "${YELLOW}Installing GRUB bootloader...${NC}"
     arch-chroot /mnt pacman -S --noconfirm grub efibootmgr os-prober
-    arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
+    arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck
 
-    # Dual Boot configuration if selected
-    if $DUAL_BOOT; then
-        echo -e "${GREEN}Configuring Dual Boot with Windows...${NC}"
+    # Configure Dual Boot if needed
+    if [[ $DUAL_BOOT == true ]]; then
+        echo -e "${GREEN}Configuring Dual Boot...${NC}"
         echo "GRUB_DISABLE_OS_PROBER=false" >> /mnt/etc/default/grub
     fi
 
     arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+
+    # Verify EFI entry
+    if ! arch-chroot /mnt efibootmgr | grep -q GRUB; then
+        echo -e "${YELLOW}Creating manual EFI entry...${NC}"
+        arch-chroot /mnt efibootmgr --create --disk /dev/$DISK --part 1 --loader /EFI/GRUB/grubx64.efi --label "Arch Linux" --unicode
+    fi
 }
 
-# --- User creation ---
-create_user() {
+# --- User setup ---
+setup_user() {
     echo -n "Enter username: "
     read USERNAME
     arch-chroot /mnt useradd -m -G wheel -s /bin/bash "$USERNAME"
     echo -e "${GREEN}Set password for $USERNAME:${NC}"
     arch-chroot /mnt passwd "$USERNAME"
 
-    # Sudo
+    # Sudo permissions
     echo "%wheel ALL=(ALL) ALL" >> /mnt/etc/sudoers
 }
 
-# --- Additional packages (network, audio) ---
-install_extras() {
-    arch-chroot /mnt pacman -S --noconfirm networkmanager sudo pipewire pulseaudio
+# --- Install additional packages ---
+install_essentials() {
+    arch-chroot /mnt pacman -S --noconfirm \
+        networkmanager \
+        sudo \
+        nano \
+        git \
+        reflector
     arch-chroot /mnt systemctl enable NetworkManager
 }
 
-# --- GUI (optional) ---
-install_gui() {
-    read -p "Install GUI? (y/N): " gui_choice
-    if [[ $gui_choice == [yY] ]]; then
-        echo -e "${GREEN}Installing GNOME...${NC}"
-        arch-chroot /mnt pacman -S --noconfirm xorg gnome gnome-extra gdm
+# --- Install desktop environment ---
+install_desktop() {
+    read -p "Install GNOME desktop? (y/N): " choice
+    if [[ $choice == [yY] ]]; then
+        arch-chroot /mnt pacman -S --noconfirm \
+            xorg \
+            gnome \
+            gnome-extra \
+            gdm
         arch-chroot /mnt systemctl enable gdm
     fi
 }
 
-# ===== MAIN =====
+# --- Main installation ---
 clear
-echo -e "${GREEN}=== VibeArchInstall 2.1 (FULL AUTO) ===${NC}"
+echo -e "${GREEN}=== Arch Linux Installer ===${NC}"
 
-# 1. Kernel selection
-kernel_menu
+# Verify UEFI
+check_uefi
 
-# 2. Network setup
+# Network setup
 setup_network
 
-# 3. Dual Boot choice
-dual_boot_choice
+# Dual Boot choice
+read -p "Enable Dual Boot with Windows? (y/N): " dual_boot
+if [[ $dual_boot == [yY] ]]; then
+    DUAL_BOOT=true
+    echo -e "${YELLOW}Dual Boot enabled${NC}"
+else
+    DUAL_BOOT=false
+    echo -e "${YELLOW}Single boot (Arch only)${NC}"
+fi
 
-# 4. Disk partitioning
-auto_partition
+# Kernel selection
+kernel_menu
 
-# 5. Arch installation
-install_arch
+# Disk setup
+select_disk
+partition_disk
 
-# 6. System configuration
+# Installation
+install_base
 configure_system
+install_bootloader
+setup_user
+install_essentials
+install_desktop
 
-# 7. GRUB (with Dual Boot option)
-install_grub
-
-# 8. User creation
-create_user
-
-# 9. Additional packages
-install_extras
-
-# 10. GUI (optional)
-install_gui
-
-# Done!
+# Completion
 echo -e "${GREEN}Installation complete!${NC}"
-echo -e "Reboot command: ${YELLOW}umount -R /mnt && reboot${NC}"
+echo -e "Unmount and reboot with: ${YELLOW}umount -R /mnt && reboot${NC}"
