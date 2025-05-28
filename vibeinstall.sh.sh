@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =============================================
-# vibeinstall
+# videinstall
 # NTFSDEV
 # =============================================
 
@@ -17,7 +17,7 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# --- Check UEFI mode ---
+# --- Enhanced UEFI check ---
 check_uefi() {
     if [[ ! -d /sys/firmware/efi ]]; then
         echo -e "${RED}Error: System is not in UEFI mode!${NC}"
@@ -26,213 +26,219 @@ check_uefi() {
     fi
 }
 
-# --- Kernel selection ---
-kernel_menu() {
-    echo -e "${GREEN}Select kernel:${NC}"
-    echo "1) Standard (linux)"
-    echo "2) LTS (linux-lts)"
-    echo "3) Zen (linux-zen)"
-    echo -n "Your choice (1/2/3): "
-    read kernel_choice
-
-    case $kernel_choice in
-        1) KERNEL="linux linux-headers" ;;
-        2) KERNEL="linux-lts linux-lts-headers" ;;
-        3) KERNEL="linux-zen linux-zen-headers" ;;
-        *) KERNEL="linux linux-headers" ;;
-    esac
-}
-
-# --- Network setup ---
+# --- Network setup with validation ---
 setup_network() {
     echo -e "${YELLOW}Configuring network...${NC}"
-
+    
     # Ethernet
     if ip link show eth0 &>/dev/null; then
         echo -e "${GREEN}Ethernet detected, configuring...${NC}"
-        dhcpcd eth0
+        if ! dhcpcd eth0; then
+            echo -e "${RED}Failed to configure Ethernet!${NC}"
+            exit 1
+        fi
     fi
 
     # Wi-Fi
     if ip link show wlan0 &>/dev/null; then
         echo -e "${GREEN}Wi-Fi detected, enter credentials:${NC}"
-        echo -n "SSID: "
-        read wifi_ssid
-        echo -n "Password: "
-        read -s wifi_pass
+        read -p "SSID: " wifi_ssid
+        read -sp "Password: " wifi_pass
         echo
-
-        iwctl station wlan0 scan
-        iwctl station wlan0 connect "$wifi_ssid" --passphrase "$wifi_pass"
-        dhcpcd wlan0
+        
+        if ! iwctl station wlan0 scan; then
+            echo -e "${RED}Failed to scan for networks!${NC}"
+            exit 1
+        fi
+        
+        if ! iwctl station wlan0 connect "$wifi_ssid" --passphrase "$wifi_pass"; then
+            echo -e "${RED}Failed to connect to Wi-Fi!${NC}"
+            exit 1
+        fi
+        
+        if ! dhcpcd wlan0; then
+            echo -e "${RED}Failed to get IP address!${NC}"
+            exit 1
+        fi
     fi
 
-    # Verify internet
-    if ! ping -c 3 archlinux.org &>/dev/null; then
+    # Verify internet with timeout
+    echo -e "${YELLOW}Verifying internet connection...${NC}"
+    if ! ping -c 3 -W 5 archlinux.org &>/dev/null; then
         echo -e "${RED}No internet connection! Check network settings.${NC}"
         exit 1
     fi
 }
 
-# --- Disk selection ---
-select_disk() {
-    echo -e "${YELLOW}Available disks:${NC}"
+# --- Disk partitioning with validation ---
+prepare_disk() {
+    echo -e "${YELLOW}Preparing disk...${NC}"
+    
+    # Show available disks
+    echo -e "${GREEN}Available disks:${NC}"
     lsblk -d -o NAME,SIZE,MODEL
-    echo -n "Enter disk name (e.g., sda/nvme0n1): "
-    read DISK
-}
-
-# --- Partitioning ---
-partition_disk() {
-    echo -e "${RED}WARNING: All data on /dev/${DISK} will be erased!${NC}"
+    
+    # Select disk
+    read -p "Enter disk name (e.g., sda/nvme0n1): " DISK
+    DISK="/dev/${DISK}"
+    
+    # Verify disk exists
+    if [[ ! -b $DISK ]]; then
+        echo -e "${RED}Error: Disk $DISK does not exist!${NC}"
+        exit 1
+    fi
+    
+    # Confirm destruction
+    echo -e "${RED}WARNING: All data on $DISK will be erased!${NC}"
     read -p "Confirm (y/N): " confirm
     [[ $confirm != [yY] ]] && exit 1
-
-    # Clear disk
-    wipefs -a /dev/$DISK
-    parted -s /dev/$DISK mklabel gpt
-
-    # Create partitions
+    
+    # Clean disk
+    echo -e "${YELLOW}Cleaning disk...${NC}"
+    wipefs -af $DISK
+    parted -s $DISK mklabel gpt
+    
+    # Calculate sizes
     RAM_SIZE=$(free -m | awk '/Mem:/ {print $2}')
-    parted -s /dev/$DISK mkpart primary fat32 1MiB 513MiB
-    parted -s /dev/$DISK set 1 esp on
-    parted -s /dev/$DISK mkpart primary linux-swap 513MiB $((513 + RAM_SIZE))MiB
-    parted -s /dev/$DISK mkpart primary ext4 $((513 + RAM_SIZE))MiB 100%
-
+    SWAP_SIZE=$((RAM_SIZE * 2)) # Double RAM for swap
+    EFI_SIZE=513 # 513MiB for EFI
+    ROOT_START=$((EFI_SIZE + SWAP_SIZE))
+    
+    # Create partitions
+    echo -e "${YELLOW}Creating partitions...${NC}"
+    parted -s $DISK mkpart primary fat32 1MiB ${EFI_SIZE}MiB
+    parted -s $DISK set 1 esp on
+    parted -s $DISK mkpart primary linux-swap ${EFI_SIZE}MiB ${ROOT_START}MiB
+    parted -s $DISK mkpart primary ext4 ${ROOT_START}MiB 100%
+    
     # Format partitions
-    mkfs.fat -F32 /dev/${DISK}p1
-    mkswap /dev/${DISK}p2
-    mkfs.ext4 -F /dev/${DISK}p3
-
+    echo -e "${YELLOW}Formatting partitions...${NC}"
+    mkfs.fat -F32 ${DISK}p1 || { echo -e "${RED}Failed to format EFI partition!${NC}"; exit 1; }
+    mkswap ${DISK}p2 || { echo -e "${RED}Failed to create swap!${NC}"; exit 1; }
+    mkfs.ext4 -F ${DISK}p3 || { echo -e "${RED}Failed to format root partition!${NC}"; exit 1; }
+    
     # Mount partitions
-    mount /dev/${DISK}p3 /mnt
-    mkdir -p /mnt/boot/efi
-    mount /dev/${DISK}p1 /mnt/boot/efi
-    swapon /dev/${DISK}p2
+    echo -e "${YELLOW}Mounting partitions...${NC}"
+    mount ${DISK}p3 /mnt || { echo -e "${RED}Failed to mount root partition!${NC}"; exit 1; }
+    mkdir -p /mnt/boot/efi || { echo -e "${RED}Failed to create boot directory!${NC}"; exit 1; }
+    mount ${DISK}p1 /mnt/boot/efi || { echo -e "${RED}Failed to mount EFI partition!${NC}"; exit 1; }
+    swapon ${DISK}p2 || { echo -e "${RED}Failed to enable swap!${NC}"; exit 1; }
+    
+    # Verify mounts
+    if ! mountpoint -q /mnt || ! mountpoint -q /mnt/boot/efi; then
+        echo -e "${RED}Mounting failed!${NC}"
+        exit 1
+    fi
 }
 
-# --- Install base system ---
-install_base() {
-    echo -e "${YELLOW}Installing Arch Linux...${NC}"
-    pacstrap /mnt base base-devel $KERNEL linux-firmware
-    genfstab -U /mnt >> /mnt/etc/fstab
+# --- Package installation with validation ---
+install_packages() {
+    echo -e "${YELLOW}Installing base system...${NC}"
+    
+    # Select kernel
+    PS3="Select kernel: "
+    select KERNEL in "linux" "linux-lts" "linux-zen"; do
+        case $KERNEL in
+            linux) KERNEL_PKGS="linux linux-headers"; break ;;
+            linux-lts) KERNEL_PKGS="linux-lts linux-lts-headers"; break ;;
+            linux-zen) KERNEL_PKGS="linux-zen linux-zen-headers"; break ;;
+            *) echo "Invalid option";;
+        esac
+    done
+    
+    # Install base system
+    if ! pacstrap /mnt base base-devel $KERNEL_PKGS linux-firmware; then
+        echo -e "${RED}Failed to install base system!${NC}"
+        exit 1
+    fi
+    
+    # Generate fstab
+    genfstab -U /mnt >> /mnt/etc/fstab || { echo -e "${RED}Failed to generate fstab!${NC}"; exit 1; }
 }
 
 # --- System configuration ---
 configure_system() {
-    # Timezone
+    echo -e "${YELLOW}Configuring system...${NC}"
+    
+    # Basic configuration
     arch-chroot /mnt ln -sf /usr/share/zoneinfo/Europe/Moscow /etc/localtime
     arch-chroot /mnt hwclock --systohc
-
-    # Locale
+    
+    # Locales
     echo "en_US.UTF-8 UTF-8" >> /mnt/etc/locale.gen
     echo "ru_RU.UTF-8 UTF-8" >> /mnt/etc/locale.gen
     arch-chroot /mnt locale-gen
     echo "LANG=en_US.UTF-8" > /mnt/etc/locale.conf
-
+    
     # Hostname
     echo "archlinux" > /mnt/etc/hostname
-    echo "127.0.0.1 localhost" >> /mnt/etc/hosts
-    echo "::1 localhost" >> /mnt/etc/hosts
-    echo "127.0.1.1 archlinux.localdomain archlinux" >> /mnt/etc/hosts
-
+    cat > /mnt/etc/hosts <<EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   archlinux.localdomain archlinux
+EOF
+    
     # Root password
     echo -e "${GREEN}Set root password:${NC}"
     arch-chroot /mnt passwd
 }
 
-# --- Install bootloader ---
+# --- Bootloader installation ---
 install_bootloader() {
-    echo -e "${YELLOW}Installing GRUB bootloader...${NC}"
+    echo -e "${YELLOW}Installing bootloader...${NC}"
+    
+    # Install GRUB
     arch-chroot /mnt pacman -S --noconfirm grub efibootmgr os-prober
+    
+    # Install to EFI
     arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck
-
-    # Configure Dual Boot if needed
-    if [[ $DUAL_BOOT == true ]]; then
-        echo -e "${GREEN}Configuring Dual Boot...${NC}"
-        echo "GRUB_DISABLE_OS_PROBER=false" >> /mnt/etc/default/grub
-    fi
-
+    
+    # Configure GRUB
     arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
-
-    # Verify EFI entry
-    if ! arch-chroot /mnt efibootmgr | grep -q GRUB; then
-        echo -e "${YELLOW}Creating manual EFI entry...${NC}"
-        arch-chroot /mnt efibootmgr --create --disk /dev/$DISK --part 1 --loader /EFI/GRUB/grubx64.efi --label "Arch Linux" --unicode
+    
+    # Verify installation
+    if [[ ! -f /mnt/boot/efi/EFI/GRUB/grubx64.efi ]]; then
+        echo -e "${RED}GRUB installation failed!${NC}"
+        exit 1
     fi
 }
 
-# --- User setup ---
-setup_user() {
-    echo -n "Enter username: "
-    read USERNAME
-    arch-chroot /mnt useradd -m -G wheel -s /bin/bash "$USERNAME"
-    echo -e "${GREEN}Set password for $USERNAME:${NC}"
-    arch-chroot /mnt passwd "$USERNAME"
-
+# --- User creation ---
+create_user() {
+    echo -e "${YELLOW}Creating user...${NC}"
+    
+    read -p "Enter username: " username
+    arch-chroot /mnt useradd -m -G wheel -s /bin/bash "$username"
+    
+    echo -e "${GREEN}Set password for $username:${NC}"
+    arch-chroot /mnt passwd "$username"
+    
     # Sudo permissions
     echo "%wheel ALL=(ALL) ALL" >> /mnt/etc/sudoers
 }
 
-# --- Install additional packages ---
-install_essentials() {
-    arch-chroot /mnt pacman -S --noconfirm \
-        networkmanager \
-        sudo \
-        nano \
-        git \
-        reflector
-    arch-chroot /mnt systemctl enable NetworkManager
+# --- Main installation flow ---
+main() {
+    clear
+    echo -e "${GREEN}=== Robust Arch Linux Installer ===${NC}"
+    
+    # Initial checks
+    check_uefi
+    setup_network
+    
+    # Disk preparation
+    prepare_disk
+    
+    # Installation
+    install_packages
+    configure_system
+    install_bootloader
+    create_user
+    
+    # Cleanup
+    echo -e "${GREEN}Installation complete!${NC}"
+    echo -e "You can now reboot with: ${YELLOW}umount -R /mnt && reboot${NC}"
 }
 
-# --- Install desktop environment ---
-install_desktop() {
-    read -p "Install GNOME desktop? (y/N): " choice
-    if [[ $choice == [yY] ]]; then
-        arch-chroot /mnt pacman -S --noconfirm \
-            xorg \
-            gnome \
-            gnome-extra \
-            gdm
-        arch-chroot /mnt systemctl enable gdm
-    fi
-}
-
-# --- Main installation ---
-clear
-echo -e "${GREEN}=== Arch Linux Installer ===${NC}"
-
-# Verify UEFI
-check_uefi
-
-# Network setup
-setup_network
-
-# Dual Boot choice
-read -p "Enable Dual Boot with Windows? (y/N): " dual_boot
-if [[ $dual_boot == [yY] ]]; then
-    DUAL_BOOT=true
-    echo -e "${YELLOW}Dual Boot enabled${NC}"
-else
-    DUAL_BOOT=false
-    echo -e "${YELLOW}Single boot (Arch only)${NC}"
-fi
-
-# Kernel selection
-kernel_menu
-
-# Disk setup
-select_disk
-partition_disk
-
-# Installation
-install_base
-configure_system
-install_bootloader
-setup_user
-install_essentials
-install_desktop
-
-# Completion
-echo -e "${GREEN}Installation complete!${NC}"
-echo -e "Unmount and reboot with: ${YELLOW}umount -R /mnt && reboot${NC}"
+# Execute main function
+main
